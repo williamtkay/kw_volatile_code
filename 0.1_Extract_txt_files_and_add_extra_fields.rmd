@@ -1,0 +1,66 @@
+```{r setup, include=FALSE}
+
+# WK - Load libraries.
+library(readr)
+library(tidyverse)
+library(readxl)
+library(writexl)
+library(openxlsx)
+
+# WK - Find all .txt files in the folder.
+txt_files <- list.files(path = "/_AMDIS_TXT_Reports/", pattern = "\\.txt$", full.names = TRUE, ignore.case=TRUE)
+
+# WK - Read all txt files into one data frame using headers from the first file only.
+mydatasetQUANT <- read_tsv(txt_files[1], show_col_types = FALSE)  # read first file with headers
+
+if (length(txt_files) > 1) {
+  for (file in txt_files[-1]) {
+    temp_df <- read_tsv(file, col_names = FALSE, skip = 1, show_col_types = FALSE)
+    colnames(temp_df) <- colnames(mydatasetQUANT)
+    mydatasetQUANT <- bind_rows(mydatasetQUANT, temp_df)
+  }
+}
+
+# WK - Remove blank columns (all NA or empty).
+mydatasetQUANT <- mydatasetQUANT %>%
+  select(where(~ !all(is.na(.) | . == "")))
+
+# WK - Clean the Name column.
+mydatasetQUANT$Name <- gsub("Name: ", "", mydatasetQUANT$Name, fixed = TRUE)
+mydatasetQUANT$Name <- str_to_sentence(tolower(mydatasetQUANT$Name))
+mydatasetQUANT$Name <- gsub("^[?\\ ]+", "", mydatasetQUANT$Name)
+
+# WK Clean the filename
+mydatasetQUANT$FileName <- gsub(".FIN", "", mydatasetQUANT$FileName)
+mydatasetQUANT$FileName <- sub(".*?\\\\DATA\\\\", "", mydatasetQUANT$FileName)
+mydatasetQUANT$Collection_Date <- sub("\\\\.*", "", mydatasetQUANT$FileName)
+mydatasetQUANT$FileName <- sub(".*?\\\\", "", mydatasetQUANT$FileName)
+
+# WK - Split FileName into parts.
+split_parts <- strsplit(mydatasetQUANT$FileName, "_")
+mydatasetQUANT$Project <- sapply(split_parts, "[", 1)
+mydatasetQUANT$Sample_set <- sapply(split_parts, function(x) paste(x[1], x[2], sep = "_"))
+mydatasetQUANT$Sample_Code <- sapply(split_parts, "[", 3)
+mydatasetQUANT$Location_Code <- substr(sapply(split_parts, "[", 3), 1, 2)
+mydatasetQUANT$Level <- substr(sapply(split_parts, "[", 3), 3, 3)
+mydatasetQUANT$Barcode <- sapply(split_parts, "[", 4)
+mydatasetQUANT$Barcode <- gsub("\\.D$", "", mydatasetQUANT$Barcode)
+
+# WK - Ensure Sample_Code is a character.
+mydatasetQUANT <- mydatasetQUANT %>%
+  mutate(Sample_Code = as.character(Sample_Code))
+
+# WK - Adjust Amount by x100 due to error with percentage conversion
+mydatasetQUANT$Amount <- (as.numeric(gsub("%", "", mydatasetQUANT$Amount)))
+
+# WK - Create xfill column (useful for WK)
+mydatasetQUANT$xfill <- substr(mydatasetQUANT$FileName, 1, 11)
+
+# WK - Save the cleaned data.
+write.xlsx(mydatasetQUANT, "../AMDIS_Reports/1_AMDIS_Reports_edited.xlsx", rowNames = FALSE)
+
+
+```
+
+
+

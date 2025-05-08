@@ -1,0 +1,44 @@
+```{r setup, include=FALSE}
+# WK - Load libraries for reading files, data wrangling, and outputting Excel/CSV results.
+library(readr)
+library(tidyverse)
+library(readxl)
+library(writexl)
+library(openxlsx)
+
+# WK - Import the primary dataset from Excel.
+clean_data <- read_excel("../AMDIS_Reports/1_AMDIS_Reports_edited.xlsx")
+
+# WK - Remove contaminants like siloxane and silane from the dataset based on the Name field.
+clean_data_1 <- clean_data %>%
+  filter(!grepl("silox|silan", Name, ignore.case = TRUE))
+
+# WK - Ensure that all values in 'RI-RI(lib)' are positive by taking their absolute value.
+clean_data_1$`RI-RI(lib)` <- abs(clean_data_1$`RI-RI(lib)`)
+
+# WK - Filter the dataset to keep rows where the RI difference is 5 or less.
+clean_data_2_reduced <- filter(clean_data_1, `RI-RI(lib)` <= 5)
+
+# WK - Order the reduced data by 'Weighted' and 'Net' values in descending order to identify top hits.
+clean_data_3_tophit <- clean_data_2_reduced %>%
+  arrange(desc(Weighted), desc(Net))
+
+# WK - Remove duplicate entries that share the same FileName and RT (retention time).
+clean_data_3_tophit <- clean_data_3_tophit %>%
+  distinct(FileName, RT, .keep_all = TRUE)
+
+# WK - Further sort the top hit data by 'Amount' and 'Net' in descending order.
+clean_data_3_tophit <- clean_data_3_tophit %>%
+  arrange(desc(Amount), desc(Net))
+
+# WK - Remove duplicate names  based on FileName and Name (sometimes there may be two repeated due to isomers) 
+clean_data_4_dupnames <- clean_data_3_tophit %>%
+  distinct(FileName, Name, .keep_all = TRUE)
+
+# WK - Write the final, cleaned dataset to an Excel file.
+output_clean_path <- "../AMDIS_Reports/2_AMDIS_Reports_edited_top_hits.xlsx"
+write.xlsx(clean_data_4_dupnames, output_clean_path, overwrite = TRUE)
+
+
+```
+

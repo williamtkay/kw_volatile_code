@@ -1,0 +1,161 @@
+```{r setup, include=FALSE}
+library(readxl)
+library(writexl)
+library(dplyr)
+library(tidyr)
+library(FactoMineR)
+library(factoextra)
+library(openxlsx)
+library(outliers)    # WK - For Dixon and Grubbs tests.
+library(Rmisc)
+library(EnvStats)    # WK - Optional ESD.
+
+# WK - Load and sort data.
+clean_data <- read_excel("../AMDIS_Reports/3_AMDIS_Reports_edited_top_hits_blank_removed.xlsx")
+clean_data <- clean_data %>% arrange(desc(Weighted), desc(Net))
+
+# WK - Get unique experiments.
+Sample_sets <- unique(clean_data$Sample_set)
+exp_outlier_list <- list()
+
+# #########################################################################
+# #########################################################################
+# WK - Process each experiment.
+for (exp in Sample_sets) {
+  
+  # WK - Filter data for experiment.
+  data_exp <- clean_data %>% filter(Sample_set == exp)
+  
+  # WK - Pivot to wide format for PCA.
+  wide_df <- data_exp %>%
+    dplyr::group_by(FileName, Name) %>%
+    dplyr::summarize(MeanAmount = mean(Amount, na.rm = TRUE), .groups = "drop") %>%
+    pivot_wider(names_from = Name, values_from = MeanAmount, values_fill = 0)
+  
+  wide_df2 <- as.data.frame(wide_df)
+  rownames(wide_df2) <- wide_df2$FileName
+  wide_df2 <- wide_df2 %>% select(-FileName)
+  
+  # WK - Run PCA.
+  pca_result <- PCA(wide_df2, scale.unit = TRUE, graph = FALSE)
+  scores <- as.data.frame(pca_result$ind$coord)
+  scores$FileName <- rownames(scores)
+  
+  # WK - Compute distance from global center (PC1-2).
+  center_exp <- colMeans(scores[, c("Dim.1", "Dim.2")])
+  scores$dist2d <- apply(scores[, c("Dim.1", "Dim.2")], 1, function(row_vec) {
+    sqrt(sum((row_vec - center_exp)^2))
+  })
+  
+  # WK - Add xfill metadata.
+  scores_exp <- left_join(scores,
+                          data_exp %>% distinct(FileName, xfill),
+                          by = "FileName")
+  
+  # WK - Run outlier tests per xfill.
+  xfillsR <- unique(scores_exp$xfill)
+  exp_scores_list <- list()
+  
+  for (j in xfillsR) {
+    df_j <- filter(scores_exp, xfill == j)
+    
+    # WK - Initialize flags.
+    df_j$outlier_dixon <- FALSE
+    df_j$outlier_chi <- FALSE
+    
+    if (nrow(df_j) >= 3) {
+      
+      # WK - Dixon's Q test on dist2d.
+      dtest <- dixon.test(df_j$dist2d, two.sided = TRUE)
+      if (dtest$p.value < 0.05) {
+        mean_val <- mean(df_j$dist2d)
+        min_val <- min(df_j$dist2d)
+        max_val <- max(df_j$dist2d)
+        if (abs(min_val - mean_val) > abs(max_val - mean_val)) {
+          idx_out <- which.min(df_j$dist2d)
+        } else {
+          idx_out <- which.max(df_j$dist2d)
+        }
+        df_j$outlier_dixon[idx_out] <- TRUE
+      }
+      
+      # WK - Mahalanobis chi-square test on PC1-2.
+      center_j <- colMeans(df_j[, c("Dim.1", "Dim.2")])
+      cov_j <- cov(df_j[, c("Dim.1", "Dim.2")])
+      inv_cov_j <- solve(cov_j)
+      df_j$mahal_d2 <- apply(df_j[, c("Dim.1", "Dim.2")], 1, function(x) {
+        diff <- x - center_j
+        as.numeric(t(diff) %*% inv_cov_j %*% diff)
+      })
+      threshold_95 <- qchisq(0.95, df = 2)
+      df_j <- df_j %>% mutate(outlier_chi = mahal_d2 > threshold_95)
+    }
+    exp_scores_list[[j]] <- df_j
+  }
+  
+  scores_exp_updated <- bind_rows(exp_scores_list)
+  
+  # WK - Save this experiment's results.
+  exp_outlier_list[[exp]] <- scores_exp_updated
+}
+
+# WK - Combine results from all experiments.
+scores2_alltests <- bind_rows(exp_outlier_list)
+
+# WK - List FileNames flagged as outliers.
+outlier_exp_any <- scores2_alltests %>%
+  filter(outlier_dixon | outlier_chi) %>%
+  pull(FileName) %>%
+  unique()
+sorted_outlier_exp_any <- sort(unique(outlier_exp_any))
+print(sorted_outlier_exp_any)
+
+# WK - Remove outlier tubes.
+final_clean_data_pca <- clean_data %>%
+  filter(!FileName %in% outlier_exp_any)
+
+# WK - Save cleaned data.
+write.xlsx(final_clean_data_pca, "../AMDIS_Reports/Final_outliers_removed_multivariate_all.xlsx", rowNames = FALSE)
+
+# #########################################################################
+# #########################################################################
+# WK - Remove compounds appearing in ≤50% of cases.
+
+clean_data <- final_clean_data_pca
+xfilles <- unique(clean_data$xfill)
+clean_data_all <- data.frame()
+
+for (x in xfilles) {
+  
+    # WK - Filter current xfill.
+    file_data <- clean_data %>% filter(xfill == x)
+    
+    # WK - Summarize by Name and FileName, then by Name.
+    file_data2 <- summarySE(file_data, measurevar = "Amount", groupvars = c("Name", "FileName"))
+    file_data2 <- summarySE(file_data2, measurevar = "Amount", groupvars = c("Name"))
+    
+    # WK - Calculate max replicates.
+    file_data2 <- file_data2 %>%
+      group_by(Name) %>%
+      mutate(techreps = max(N)) %>%
+      ungroup()
+    
+    # WK - Keep names with >50% appearance.
+    clean_data_new <- file_data2 %>%
+      filter(N / techreps > 0.5)
+    namestokeep <- unique(clean_data_new$Name)
+    
+    # WK - Append data for names to keep.
+    file_data_cleaned <- subset(file_data, Name %in% namestokeep)
+    clean_data_all <- rbind(clean_data_all, file_data_cleaned)
+    
+}
+
+clean_data_all$Presence <- 1
+
+# WK - Save final multivariate cleaned data.
+write.xlsx(clean_data_all, "../AMDIS_Reports/4_AMDIS_Reports_edited_top_hits_blanks_outliers_removed.xlsx", rowNames = FALSE)
+
+
+
+```

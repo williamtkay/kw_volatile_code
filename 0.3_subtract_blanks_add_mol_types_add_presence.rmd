@@ -1,0 +1,118 @@
+```{r setup, include=FALSE}
+
+# WK - Load required libraries for data manipulation, reading Excel files, and plotting.
+library(dplyr)
+library(readxl)
+library(openxlsx)
+library(Rmisc)
+library(VIM)  
+
+# WK - Import the main dataset from Excel and create a working copy.
+mydatasetQUANT <- read_excel("../AMDIS_Reports/2_AMDIS_Reports_edited_top_hits.xlsx")
+clean_data = mydatasetQUANT
+
+# WK - Extract unique sample sets and initialize the dataset copy for later editing.
+Sample_sets <- unique(clean_data$Sample_set)
+Sample_setsdatatoeditfull <- clean_data  # WK - Create a full copy for modifications.
+Sample_setsdatatoeditfull$Area_edited <- clean_data$Area  # WK - Initialize 'Area_edited' with the original 'Area' values.
+
+# WK - Loop through each sample set to adjust 'Area_edited' by subtracting blank entries (Location_Code "00").
+for (x in Sample_sets) {
+  
+  # WK - Subset data for the current sample set.
+  Sample_setsdata <- subset(clean_data, Sample_set == x)
+  
+  # WK - Identify rows with a blank location (Location_Code equals "00") and get the unique Names.
+  blankdata <- subset(Sample_setsdata, Location_Code == "00")
+  blanknames <- unique(blankdata$Name)
+
+  # WK - For each name with blank entries, calculate the maximum blank 'Area' and subtract it.
+  for (z in blanknames) {
+    blankdatamax <- subset(blankdata, Name == z)
+    namearea <- max(blankdatamax$Area)  # WK - Max 'Area' for this Name in the blank subset.
+
+    # WK - Adjust 'Area_edited' by subtracting the maximum blank area; ensure no negative values.
+    match_rows <- Sample_setsdatatoeditfull$Sample_set == x & Sample_setsdatatoeditfull$Name == z
+    Sample_setsdatatoeditfull$Area_edited[match_rows] <- pmax(0, Sample_setsdatatoeditfull$Area[match_rows] - namearea)
+  }
+}
+
+# WK - Start processing the percentage amounts and areas for each file (based on amount edited)
+filenames <- unique(Sample_setsdatatoeditfull$FileName)
+Sample_setsdatatoeditfull$Amount_edited <- NA  # WK - Initialize the 'Amount_edited' column.
+
+# WK - Loop through each file to calculate the adjusted percentage amounts and areas.
+for (k in filenames) {
+  
+  # WK - Subset data for the current file.
+  totaldata <- subset(Sample_setsdatatoeditfull, FileName == k)
+  
+  # WK - Ensure that there's enough data (at least two rows) and that the second row has a valid 'Amount'.
+  if (nrow(totaldata) >= 2 && !is.na(totaldata$Amount[2]) && totaldata$Amount[2] != 0) {
+    
+    # WK - Calculate a scaling factor for the file based on the second row's values.
+    totalarea <- (100 / totaldata$Amount[2]) * totaldata$Area[2]
+    
+    # WK - Update 'Amount_edited' for all rows from the current file using the scaling factor.
+    Sample_setsdatatoeditfull$Amount_edited[Sample_setsdatatoeditfull$FileName == k] <- 
+      Sample_setsdatatoeditfull$Area_edited[Sample_setsdatatoeditfull$FileName == k] / totalarea * 100
+    
+  } else {
+    # WK - If the data is insufficient or the second row's Amount is invalid, assign NA.
+    Sample_setsdatatoeditfull$Amount_edited[Sample_setsdatatoeditfull$FileName == k] <- NA
+  }
+}
+
+# WK - Load compound type data and merge with the main dataset.
+mydatasetCOMPOUNDS <- read_excel("../../../Library_helper_files_names_etc/Compound_types.xlsx")
+
+# WK - Merge the compound type information (including Type_7 and Type_4) into the main dataset based on 'Name'.
+Sample_setsdatatoeditfull <- Sample_setsdatatoeditfull %>%
+  left_join(mydatasetCOMPOUNDS %>% dplyr::select(Name, Type_7, Type_4), by = "Name")
+
+# WK - Preview the merged dataset and replace any missing 'Amount_edited' values with 0.
+Sample_setsdatatoeditfull$Amount_edited[is.na(Sample_setsdatatoeditfull$Amount_edited)] <- 0
+
+# WK - Read external sampling and location sheets to add colour coding and collection dates.
+samplingsheet <- read_excel("../../../Sampling_spreadsheet.xlsx", sheet = 1)
+
+# WK - Merge location info to obtain the Color using the 'Location_Code' as key.
+Sample_setsdatatoeditfull2 <- left_join(Sample_setsdatatoeditfull, samplingsheet[, c("FileName", "Date_collection","Location_Name", "Location_Code", "Color","Level_Name","Exp_Name")], by = "FileName")
+Sample_setsdatatoeditfull2$Date_collection <- substr(Sample_setsdatatoeditfull2$Date_collection, 1, 7)
+
+# WK - Compute relative amounts for each compound within each sample set.
+Sample_sets = unique(Sample_setsdatatoeditfull2$Sample_set)
+dffull = data.frame()
+
+# WK - Loop over every sample set/experiment
+for (j in Sample_sets) {
+  
+  df_xfill = subset(Sample_setsdatatoeditfull2, Sample_set == j)
+  
+  # WK - Identify unique compounds (xfill) in the current sample set.
+  xfills <- unique(df_xfill$xfill)
+  
+  # WK - Process each compound and compute its relative percentage using the maximum Amount_edited.
+  for (k in xfills) {
+    df_Sample_set <- subset(df_xfill, xfill == k)
+    max_val = max(df_Sample_set$Amount_edited)
+    df_Sample_set$Relative = df_Sample_set$Amount_edited / max_val
+    
+    # WK - Append the results to the aggregate data frame.
+    dffull = rbind(dffull, df_Sample_set)
+  }
+}
+
+# WK - Remove duplicated rows based on key columns to ensure unique records (just incase)
+dffull_unique <- dffull[!duplicated(dffull[c("FileName", "CAS", "Name", "RT")]), ]
+
+# WK - Add presence column for anything that is not zero (post blank removal)
+dffull_unique <- dffull_unique %>%
+  dplyr::mutate(Presence = if_else(Amount_edited > 0, 1, 0))
+
+# WK - Export the final cleaned and merged dataset to an Excel file.
+write.xlsx(dffull_unique, "../AMDIS_Reports/3_AMDIS_Reports_edited_top_hits_blank_removed.xlsx", rowNames = FALSE)
+
+
+```
+
